@@ -34,7 +34,7 @@ const config: HardhatUserConfig = {
       type: "http",
       chainType: "l1",
       url: "https://evmtestnet.confluxrpc.com",
-      accounts: ["0x32d750bd670b87f91151e1fb2aa0658a824b89fa66a4b5aecd9eb199ee73bfee"],
+      accounts: ["a3e0672445a0a6b383cdb10d9f3ab4cf612d21b3c0f37f691b3e8ca34b39538e"],
     },
   },
 };

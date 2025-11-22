@@ -4,9 +4,8 @@
    - compatible with ethers v6 UMD build (global `ethers`)
 */
 
-let CONTRACT_ADDRESS = "0x3a7D11d85116E68f24C888Dd9431E02B3B91e09a"; // your deployed address
-let res = await fetch('charityAbi.json');
-let CONTRACT_ABI = await res.json();
+let CONTRACT_ADDRESS = "0xD09bf13AaFba0Cb3e0a0d5556eF75C4Bd69fe340"; // your deployed address
+let CONTRACT_ABI = null; // Sẽ được load trong loadAbi() function
 
 let provider = null;
 let signer = null;
@@ -16,6 +15,50 @@ let contract = null;
 let eventsAttached = false;
 
 // ---------- helpers ----------
+async function switchToConfluxNetwork() {
+  if (!window.ethereum) {
+    showAlert("MetaMask không được tìm thấy!", "danger");
+    return false;
+  }
+  
+  try {
+    await window.ethereum.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: '0x47' }], // 71 in hex
+    });
+    return true;
+  } catch (switchError) {
+    // Network chưa được thêm, hãy thêm nó
+    if (switchError.code === 4902) {
+      try {
+        await window.ethereum.request({
+          method: 'wallet_addEthereumChain',
+          params: [{
+            chainId: '0x47',
+            chainName: 'Conflux eSpace Testnet',
+            nativeCurrency: {
+              name: 'CFX',
+              symbol: 'CFX',
+              decimals: 18,
+            },
+            rpcUrls: ['https://evmtestnet.confluxrpc.com'],
+            blockExplorerUrls: ['https://evmtestnet.confluxscan.io'],
+          }],
+        });
+        return true;
+      } catch (addError) {
+        console.error("Failed to add network:", addError);
+        showAlert("Không thể thêm Conflux network. Vui lòng thêm thủ công.", "danger");
+        return false;
+      }
+    } else {
+      console.error("Failed to switch network:", switchError);
+      showAlert("Không thể chuyển network: " + switchError.message, "danger");
+      return false;
+    }
+  }
+}
+
 function showAlert(message, type = "success", timeout = 4500) {
   const wrap = document.getElementById("alertPlaceholder");
   if (!wrap) return;
@@ -89,17 +132,66 @@ async function connectMetaMask() {
     if (!CONTRACT_ABI) await loadAbi();
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
 
+    // Kiểm tra network
+    const network = await provider.getNetwork();
+    console.log("Connected to network:", network.name, network.chainId);
+    
+    const switchNetworkBtn = document.getElementById("switchNetworkBtn");
+    if (network.chainId !== 71n) {
+      showAlert(`⚠️ Sai network! Hiện tại: ${network.chainId}. Cần: Conflux eSpace Testnet (71)`, "warning", 10000);
+      if (switchNetworkBtn) switchNetworkBtn.style.display = "inline-block";
+      // Vẫn tiếp tục để user có thể switch network
+    } else {
+      if (switchNetworkBtn) switchNetworkBtn.style.display = "none";
+    }
+
+    // Kiểm tra contract có tồn tại không
+    const code = await provider.getCode(CONTRACT_ADDRESS);
+    if (!code || code === "0x") {
+      showAlert("❌ Contract không tồn tại tại địa chỉ này!", "danger");
+      return;
+    }
+
+    // Kiểm tra quyền admin với error handling
+    let isAdmin = false;
+    let owner = "Unknown";
+    
+    try {
+      // Test basic contract call first
+      const nextId = await contract.nextCampaignId();
+      console.log("Contract working, nextCampaignId:", nextId.toString());
+      
+      // Now try admin functions
+      owner = await contract.owner();
+      isAdmin = await contract.isAdmin(currentAccount);
+    } catch (err) {
+      console.error("Error checking admin status:", err);
+      showAlert("⚠️ Không thể kiểm tra quyền admin. Contract có thể chưa ready.", "warning");
+      // Continue anyway
+    }
+    
     const adminWalletEl = document.getElementById("adminWallet");
-    if (adminWalletEl) adminWalletEl.innerHTML = `<i class="fas fa-wallet"></i> ${shaCut(currentAccount)}`;
+    if (adminWalletEl) {
+      if (isAdmin) {
+        adminWalletEl.innerHTML = `<i class="fas fa-wallet"></i> <span class="badge bg-success">ADMIN</span> ${shaCut(currentAccount)}`;
+      } else {
+        adminWalletEl.innerHTML = `<i class="fas fa-wallet"></i> <span class="badge bg-warning">USER</span> ${shaCut(currentAccount)}`;
+      }
+    }
+    
     const logoutBtn = document.getElementById("logoutBtn");
     if (logoutBtn) logoutBtn.style.display = "inline-block";
 
-    showAlert("Kết nối MetaMask thành công ✅");
+    showAlert(isAdmin ? 
+      "Kết nối MetaMask thành công - Bạn là Admin ✅" : 
+      `Kết nối MetaMask thành công - Bạn không có quyền admin. Owner: ${shaCut(owner)}`, 
+      isAdmin ? "success" : "info");
+      
     await refreshDashboard();
     attachContractEventListeners();
   } catch (err) {
-    console.error(err);
-    showAlert("Lỗi khi kết nối MetaMask: " + (err?.message || err), "danger");
+    console.error("Connect error:", err);
+    showAlert("Lỗi khi kết nối MetaMask: " + (err?.reason || err?.message || err), "danger");
   }
 }
 
@@ -114,12 +206,27 @@ async function connectLocalRPC(url = "http://127.0.0.1:8545") {
     if (!CONTRACT_ABI) await loadAbi();
     contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
 
+    // Kiểm tra quyền admin
+    const isAdmin = await contract.isAdmin(currentAccount);
+    const owner = await contract.owner();
+    
     const adminWalletEl = document.getElementById("adminWallet");
-    if (adminWalletEl) adminWalletEl.innerHTML = `<i class="fas fa-plug"></i> Local ${shaCut(currentAccount)}`;
+    if (adminWalletEl) {
+      if (isAdmin) {
+        adminWalletEl.innerHTML = `<i class="fas fa-plug"></i> <span class="badge bg-success">ADMIN</span> Local ${shaCut(currentAccount)}`;
+      } else {
+        adminWalletEl.innerHTML = `<i class="fas fa-plug"></i> <span class="badge bg-warning">USER</span> Local ${shaCut(currentAccount)}`;
+      }
+    }
+    
     const logoutBtn = document.getElementById("logoutBtn");
     if (logoutBtn) logoutBtn.style.display = "inline-block";
 
-    showAlert("Kết nối Hardhat RPC thành công ⚡");
+    showAlert(isAdmin ? 
+      "Kết nối Hardhat RPC thành công - Bạn là Admin ⚡" : 
+      `Kết nối Hardhat RPC thành công - Bạn không có quyền admin. Owner: ${shaCut(owner)}`, 
+      isAdmin ? "success" : "warning");
+      
     await refreshDashboard();
     attachContractEventListeners();
   } catch (err) {
@@ -160,7 +267,16 @@ async function isAdminAddress(addr = null) {
   try {
     const who = addr || currentAccount;
     if (!who) return false;
-    return await contract.isAdmin(who);
+    
+    // First check if contract is responsive
+    const nextId = await contract.nextCampaignId();
+    if (!nextId) {
+      console.warn("Contract not responsive");
+      return false;
+    }
+    
+    const result = await contract.isAdmin(who);
+    return result;
   } catch (e) {
     console.warn("isAdmin check failed", e);
     return false;
@@ -234,6 +350,28 @@ async function getComment(campaignId, index) {
 }
 
 // ---------- write functions ----------
+async function setAdminFrontend(address, isAdmin) {
+  try {
+    const c = requireContractSafely();
+    const owner = await c.owner();
+    if (currentAccount.toLowerCase() !== owner.toLowerCase()) {
+      showAlert("Chỉ owner mới có thể thiết lập admin.", "warning");
+      return;
+    }
+    
+    const tx = await c.setAdmin(address, isAdmin);
+    showAlert("Đang gửi yêu cầu thiết lập admin...", "info", 8000);
+    const receipt = await tx.wait();
+    showAlert(`${isAdmin ? "Cấp" : "Thu hồi"} quyền admin thành công — tx: <code>${receipt.transactionHash}</code>`, "success", 8000);
+    await refreshDashboard();
+    return receipt;
+  } catch (err) {
+    console.error(err);
+    showAlert("Thiết lập admin thất bại: " + (err?.reason || err?.message || err), "danger");
+    throw err;
+  }
+}
+
 async function createCampaignFrontend(formData) {
   try {
     const c = requireContractSafely();
@@ -484,6 +622,57 @@ async function refreshCampaignDetail(campaignId) {
 }
 
 // ---------- small UI helpers ----------
+async function checkAdminStatus() {
+  if (!contract || !currentAccount) {
+    showAlert("Vui lòng kết nối ví trước.", "warning");
+    return;
+  }
+  
+  try {
+    // Kiểm tra network trước
+    const network = await provider.getNetwork();
+    console.log("Current network:", network.chainId);
+    
+    if (network.chainId !== 71n) {
+      showAlert(`⚠️ Sai network! Hiện tại: ${network.chainId}. Vui lòng chuyển sang Conflux eSpace Testnet (71)`, "warning", 8000);
+      return;
+    }
+    
+    // Kiểm tra contract
+    const code = await provider.getCode(CONTRACT_ADDRESS);
+    if (!code || code === "0x") {
+      showAlert("❌ Contract không tồn tại!", "danger");
+      return;
+    }
+    
+    // Test contract responsiveness
+    const nextId = await contract.nextCampaignId();
+    console.log("Contract responsive, nextCampaignId:", nextId.toString());
+    
+    const owner = await contract.owner();
+    const isAdmin = await contract.isAdmin(currentAccount);
+    
+    // Cập nhật UI
+    const ownerEl = document.getElementById("contractOwner");
+    const addressEl = document.getElementById("currentAddress");
+    const statusEl = document.getElementById("currentAdminStatus");
+    const contractAddrEl = document.getElementById("contractAddress");
+    
+    if (ownerEl) ownerEl.textContent = `${owner} ${owner.toLowerCase() === currentAccount.toLowerCase() ? '(Bạn)' : ''}`;
+    if (addressEl) addressEl.textContent = shaCut(currentAccount);
+    if (statusEl) {
+      statusEl.className = `badge ${isAdmin ? 'bg-success' : 'bg-warning'}`;
+      statusEl.textContent = isAdmin ? 'ADMIN' : 'USER';
+    }
+    if (contractAddrEl) contractAddrEl.textContent = CONTRACT_ADDRESS;
+    
+    showAlert(`✅ Trạng thái: ${isAdmin ? 'Admin' : 'User'}. Owner: ${shaCut(owner)}`, "info", 3000);
+  } catch (err) {
+    console.error("Check admin status error:", err);
+    showAlert("❌ Lỗi kiểm tra trạng thái: " + (err?.reason || err?.message || err), "danger");
+  }
+}
+
 async function openCampaignDetail(id) {
   await refreshCampaignDetail(id);
   showAlert(`Đang tải chi tiết chiến dịch #${id}`, "info", 2500);
@@ -515,6 +704,18 @@ function bindUI() {
   if (localBtn) localBtn.addEventListener("click", () => connectLocalRPC());
   const logoutBtn = document.getElementById("logoutBtn");
   if (logoutBtn) logoutBtn.addEventListener("click", disconnectWallet);
+  const switchNetworkBtn = document.getElementById("switchNetworkBtn");
+  if (switchNetworkBtn) switchNetworkBtn.addEventListener("click", async () => {
+    const success = await switchToConfluxNetwork();
+    if (success) {
+      showAlert("Đã chuyển sang Conflux network thành công!", "success");
+      switchNetworkBtn.style.display = "none";
+      // Reload contract connection
+      if (currentAccount) {
+        await connectMetaMask();
+      }
+    }
+  });
 
   const form = document.getElementById("campaignForm");
   if (form) {
@@ -563,6 +764,30 @@ function bindUI() {
       disForm.reset();
     });
   }
+
+  const adminForm = document.getElementById("adminForm");
+  if (adminForm) {
+    adminForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const address = document.getElementById("adminAddress").value.trim();
+      const isAdmin = document.querySelector('input[name="adminAction"]:checked').value === "true";
+      
+      if (!address) { 
+        showAlert("Vui lòng nhập địa chỉ ví.", "warning"); 
+        return; 
+      }
+      
+      if (!ethers.isAddress(address)) {
+        showAlert("Địa chỉ ví không hợp lệ.", "warning");
+        return;
+      }
+      
+      await setAdminFrontend(address, isAdmin);
+      adminForm.reset();
+      // Refresh status after change
+      setTimeout(checkAdminStatus, 2000);
+    });
+  }
 }
 
 // ---------- init ----------
@@ -592,11 +817,14 @@ window.addEventListener("load", async () => {
 window.connectMetaMask = connectMetaMask;
 window.connectLocalRPC = connectLocalRPC;
 window.disconnectWallet = disconnectWallet;
+window.switchToConfluxNetwork = switchToConfluxNetwork;
 window.loadAllCampaigns = loadAllCampaigns;
 window.createCampaignFrontend = createCampaignFrontend;
 window.donateToCampaign = donateToCampaign;
 window.disburseFromContractFrontend = disburseFromContractFrontend;
+window.setAdminFrontend = setAdminFrontend;
 window.likeCampaignFrontend = likeCampaignFrontend;
 window.unlikeCampaignFrontend = unlikeCampaignFrontend;
 window.addCommentFrontend = addCommentFrontend;
 window.openCampaignDetail = openCampaignDetail;
+window.checkAdminStatus = checkAdminStatus;
